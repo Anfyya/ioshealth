@@ -24,6 +24,7 @@ final class AppState: ObservableObject {
     private let storage = LocalModelStore()
 
     init() {
+        print(MLXRuntime.smokeTest())
         if let saved = try? storage.load() {
             bundle = saved.bundle
             summary = saved.summary

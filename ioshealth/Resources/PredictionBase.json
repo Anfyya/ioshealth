@@ -1,0 +1,25 @@
+{
+  "model_type": "anomaly_transformer_crossattn_pred",
+  "source": "PMData 16 participants, lifted to Apple Health 8-feature layout (fine-tuned)",
+  "win_size": 252,
+  "context_len": 228,
+  "predict_horizon": 24,
+  "enc_in": 8,
+  "c_out": 8,
+  "d_model": 64,
+  "n_heads": 4,
+  "e_layers": 2,
+  "d_ff": 128,
+  "activation": "gelu",
+  "predictor_type": "cross_attn",
+  "feature_order": [
+    "heartRate",
+    "steps",
+    "activeEnergy",
+    "hrv",
+    "oxygen",
+    "respiratoryRate",
+    "sleep",
+    "exercise"
+  ]
+}
