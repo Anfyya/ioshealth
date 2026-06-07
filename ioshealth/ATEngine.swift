@@ -134,26 +134,49 @@ final class ATEngine {
 
     // MARK: Scoring
 
+    // Scoring runs in chunks: a full-dataset forward would build an attention
+    // tensor of [N, heads, L, L] (~0.5 GB for hundreds of windows) and get the
+    // app OOM-killed on device. Chunking bounds peak memory to a few dozen MB.
+    private static let scoreBatch = 32
+
     /// Max per-step reconstruction error within each window (valid steps only).
     func reconScores(_ windows: [HealthWindow]) -> [Double] {
         guard let model = reconNet, !windows.isEmpty else {
             return Array(repeating: 0, count: windows.count)
         }
-        let (X, M) = ATEngine.toBatch(windows, cfg)
-        let err = square(model(X) - X).mean(axis: -1) * M   // [N,L]
-        return err.max(axis: 1).asArray(Float.self).map(Double.init)
+        var out: [Double] = []
+        var s = 0
+        while s < windows.count {
+            let e = min(s + ATEngine.scoreBatch, windows.count)
+            let (X, M) = ATEngine.toBatch(Array(windows[s..<e]), cfg)
+            let err = square(model(X) - X).mean(axis: -1) * M   // [B,L]
+            let sc = err.max(axis: 1)
+            eval(sc)
+            out.append(contentsOf: sc.asArray(Float.self).map(Double.init))
+            s = e
+        }
+        return out
     }
 
     /// Max per-step prediction error over the forecast horizon for each window.
     func predScores(_ windows: [HealthWindow]) -> [Double] {
         guard !windows.isEmpty else { return [] }
-        let (X, M) = ATEngine.toBatch(windows, cfg)
-        let pred = predNet(X)                                       // [N,horizon,F]
         let h = cfg.horizon
-        let future = X[0..., (cfg.winSize - h) ..< cfg.winSize, 0...]
-        let fmask = M[0..., (cfg.winSize - h) ..< cfg.winSize]
-        let err = square(pred - future).mean(axis: -1) * fmask     // [N,horizon]
-        return err.max(axis: 1).asArray(Float.self).map(Double.init)
+        var out: [Double] = []
+        var s = 0
+        while s < windows.count {
+            let e = min(s + ATEngine.scoreBatch, windows.count)
+            let (X, M) = ATEngine.toBatch(Array(windows[s..<e]), cfg)
+            let pred = predNet(X)                                       // [B,horizon,F]
+            let future = X[0..., (cfg.winSize - h) ..< cfg.winSize, 0...]
+            let fmask = M[0..., (cfg.winSize - h) ..< cfg.winSize]
+            let err = square(pred - future).mean(axis: -1) * fmask     // [B,horizon]
+            let sc = err.max(axis: 1)
+            eval(sc)
+            out.append(contentsOf: sc.asArray(Float.self).map(Double.init))
+            s = e
+        }
+        return out
     }
 
     /// Per-feature reconstruction error at the most anomalous step of a window
