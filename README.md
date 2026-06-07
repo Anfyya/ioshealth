@@ -1,13 +1,22 @@
 ﻿# ioshealth
 
-SwiftUI iOS App 工程。目标是端侧健康异常检测：
+端侧(on-device)健康异常检测 iOS App(SwiftUI,iOS 26)。全部在你的 iPhone 上运行,数据不上传。
 
-- 首次授权后读取 Apple Health / HealthKit 历史数据
-- 聚合为 4 小时数据块，做缺失处理和训练集标准化
-- 本地训练个人重建模型
-- 内置 PMData16 4h、PMData16 lifted 8维 4h、RAIS57 日级多人预测先验，并用用户历史数据本地微调个人预测模型
-- 用个人重建、个人预测、多人预测三路分位数融合生成异常等级
-- 用户模型保存在本机 Application Support，不上传服务器
+## 它做什么
+
+- 首次授权后读取 Apple Health 历史,8 个指标:心率、步数、活动消耗、心率变异性(HRV)、血氧、呼吸频率、睡眠、运动时长
+- 聚合为 4 小时数据块,做缺失处理 + 按个人数据 z-score 标准化,切成 252 块(约 42 天)的滑动窗口
+- **双模型异常检测**,基于 Anomaly Transformer(ICLR 2022),用 [MLX](https://github.com/ml-explore/mlx-swift) 在端侧运行:
+  - **个人重建模型**:用你自己的数据**在 iPhone 上训练**(MLX + AdamW + masked MSE)。擅长发现"多个指标之间的配合关系被打破"
+  - **多人预测基座**:内置预训练权重(16 人数据,cross-attention 预测解码),只推理。擅长发现单指标突变 / 渐变趋势 / 节律偏离
+  - 两类异常互补(经合成数据基准验证):重建擅长联动破裂与突发,预测擅长单变量与渐变
+- 两路误差按**你自己的分布**做分位校准后融合,给出风险等级 + 说人话的解释("哪项指标不对劲、为什么")
+- 结果保存在本机 Application Support,不上传服务器
+
+## 模型与依赖
+
+- 端侧 ML 运行时:`mlx-swift`(Swift Package,首次构建自动拉取)
+- 预测基座权重 [ioshealth/Resources/PredictionBase.safetensors](ioshealth/Resources/PredictionBase.safetensors) 由配套的 PyTorch 训练工程导出(Anomaly Transformer 重建/预测);位置编码、距离矩阵等确定性 buffer 在端侧按公式重算,不入包。
 
 ## 打开方式
 
@@ -17,17 +26,7 @@ SwiftUI iOS App 工程。目标是端侧健康异常检测：
 open ioshealth.xcodeproj
 ```
 
-需要真机运行并开启 HealthKit capability。Bundle ID 当前是 `com.codex.healthanomaly`，上线前需要改成你的开发者账号可用的 ID。
-
-## 本地静态校验
-
-当前 Windows 环境不能执行 Xcode 编译，可先运行无第三方依赖的结构校验：
-
-```bash
-python tools/validate_ioshealth.py
-```
-
-通过后仍需要在 macOS/Xcode 上做真实编译、签名和真机 HealthKit 权限验证。
+首次构建会自动拉取 `mlx-swift`(需要联网)。真机运行需开启 HealthKit capability。Bundle ID 当前是 `com.codex.healthanomaly`，上线前需要改成你的开发者账号可用的 ID。
 
 ## GitHub Actions 自动编译 IPA
 
