@@ -50,7 +50,7 @@ final class ATEngine {
             throw ATEngineError.missingResource("PredictionBase.safetensors")
         }
         let raw = try loadArrays(url: wURL)
-        let remapped = ATEngine.remapConvWeights(raw)
+        let remapped = ATEngine.remapWeights(raw)
         // Use the throwing update with no strict verification: the convenience
         // (non-throwing) update does `try!` + verification and turns any
         // key/shape check into a hard crash. Our keys map 1:1 to the bundled
@@ -60,11 +60,19 @@ final class ATEngine {
         eval(predNet)
     }
 
-    /// PyTorch Conv1d weights are [out, in, k]; MLX Conv1d wants [out, k, in].
-    private static func remapConvWeights(_ w: [String: MLXArray]) -> [String: MLXArray] {
-        var out = w
-        for (k, v) in w where k.hasSuffix("tokenConv.weight") || k.hasSuffix("conv1.weight") || k.hasSuffix("conv2.weight") {
-            out[k] = v.swappedAxes(1, 2)
+    /// Adapt the exported PyTorch weights to the MLX module layout:
+    ///  - Conv1d weights [out, in, k] -> MLX [out, k, in]
+    ///  - FFN sequential indices ffn.0 / ffn.3 -> named children fc1 / fc2
+    ///    (numeric keys would be parsed as array indices by `unflattened`).
+    private static func remapWeights(_ w: [String: MLXArray]) -> [String: MLXArray] {
+        var out: [String: MLXArray] = [:]
+        for (k, v) in w {
+            let value = (k.hasSuffix("tokenConv.weight") || k.hasSuffix("conv1.weight") || k.hasSuffix("conv2.weight"))
+                ? v.swappedAxes(1, 2) : v
+            var key = k
+            key = key.replacingOccurrences(of: "predictor.ffn.0.", with: "predictor.ffn.fc1.")
+            key = key.replacingOccurrences(of: "predictor.ffn.3.", with: "predictor.ffn.fc2.")
+            out[key] = value
         }
         return out
     }

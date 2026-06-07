@@ -263,10 +263,12 @@ final class CrossAttention: Module {
     }
 }
 
-/// FFN matching nn.Sequential(Linear, GELU, Dropout, Linear) — keys "0" and "3".
+/// FFN matching PyTorch nn.Sequential(Linear, GELU, Dropout, Linear). The
+/// PyTorch keys ffn.0 / ffn.3 are remapped to fc1 / fc2 at load time, because
+/// numeric child keys are interpreted as array indices by MLX's unflattening.
 final class FFN: Module {
-    @ModuleInfo(key: "0") var fc1: Linear
-    @ModuleInfo(key: "3") var fc2: Linear
+    @ModuleInfo(key: "fc1") var fc1: Linear
+    @ModuleInfo(key: "fc2") var fc2: Linear
 
     init(_ dModel: Int, _ cOut: Int) {
         self._fc1.wrappedValue = Linear(dModel, dModel)
