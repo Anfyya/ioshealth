@@ -51,7 +51,12 @@ final class ATEngine {
         }
         let raw = try loadArrays(url: wURL)
         let remapped = ATEngine.remapConvWeights(raw)
-        predNet.update(parameters: ModuleParameters.unflattened(remapped))
+        // Use the throwing update with no strict verification: the convenience
+        // (non-throwing) update does `try!` + verification and turns any
+        // key/shape check into a hard crash. Our keys map 1:1 to the bundled
+        // weights, so `.none` loads them all; any real failure now propagates
+        // as a catchable Swift error instead of trapping.
+        try predNet.update(parameters: ModuleParameters.unflattened(remapped), verify: .none)
         eval(predNet)
     }
 
