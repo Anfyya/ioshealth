@@ -16,6 +16,11 @@ import MLXOptimizers
 
 enum ATEngineError: Error { case missingResource(String) }
 
+struct ATScoreDetail: Sendable {
+    let score: Double
+    let stepIndex: Int
+}
+
 private struct PredBaseConfig: Decodable {
     let win_size: Int
     let context_len: Int
@@ -149,18 +154,22 @@ final class ATEngine {
 
     /// Max per-step reconstruction error within each window (valid steps only).
     func reconScores(_ windows: [HealthWindow]) -> [Double] {
+        reconScoreDetails(windows).map(\.score)
+    }
+
+    /// Max per-step reconstruction error and the bucket that caused it.
+    func reconScoreDetails(_ windows: [HealthWindow]) -> [ATScoreDetail] {
         guard let model = reconNet, !windows.isEmpty else {
-            return Array(repeating: 0, count: windows.count)
+            return Array(repeating: ATScoreDetail(score: 0, stepIndex: 0), count: windows.count)
         }
-        var out: [Double] = []
+        var out: [ATScoreDetail] = []
         var s = 0
         while s < windows.count {
             let e = min(s + ATEngine.scoreBatch, windows.count)
             let (X, M) = ATEngine.toBatch(Array(windows[s..<e]), cfg)
             let err = square(model(X) - X).mean(axis: -1) * M   // [B,L]
-            let sc = err.max(axis: 1)
-            eval(sc)
-            out.append(contentsOf: sc.asArray(Float.self).map(Double.init))
+            eval(err)
+            out.append(contentsOf: ATEngine.details(from: err.asArray(Float.self), rows: e - s, cols: cfg.winSize))
             s = e
         }
         return out
@@ -168,9 +177,14 @@ final class ATEngine {
 
     /// Max per-step prediction error over the forecast horizon for each window.
     func predScores(_ windows: [HealthWindow]) -> [Double] {
+        predScoreDetails(windows).map(\.score)
+    }
+
+    /// Max prediction error over the forecast horizon and the horizon bucket that caused it.
+    func predScoreDetails(_ windows: [HealthWindow]) -> [ATScoreDetail] {
         guard !windows.isEmpty else { return [] }
         let h = cfg.horizon
-        var out: [Double] = []
+        var out: [ATScoreDetail] = []
         var s = 0
         while s < windows.count {
             let e = min(s + ATEngine.scoreBatch, windows.count)
@@ -179,9 +193,8 @@ final class ATEngine {
             let future = X[0..., (cfg.winSize - h) ..< cfg.winSize, 0...]
             let fmask = M[0..., (cfg.winSize - h) ..< cfg.winSize]
             let err = square(pred - future).mean(axis: -1) * fmask     // [B,horizon]
-            let sc = err.max(axis: 1)
-            eval(sc)
-            out.append(contentsOf: sc.asArray(Float.self).map(Double.init))
+            eval(err)
+            out.append(contentsOf: ATEngine.details(from: err.asArray(Float.self), rows: e - s, cols: h))
             s = e
         }
         return out
@@ -189,12 +202,37 @@ final class ATEngine {
 
     /// Per-feature reconstruction error at the most anomalous step of a window
     /// (used to explain which metric is off). Returns `cfg.encIn` values.
-    func reconFeatureError(_ window: HealthWindow) -> [Double] {
+    func reconFeatureError(_ window: HealthWindow, stepIndex: Int? = nil) -> [Double] {
         guard let model = reconNet else { return Array(repeating: 0, count: cfg.encIn) }
         let (X, M) = ATEngine.toBatch([window], cfg)
         let sq = square(model(X) - X)                 // [1,L,F]
-        let perStep = (sq.mean(axis: -1)[0]) * M[0]   // [L]
-        let worst = argMax(perStep, axis: 0).item(Int.self)
+        let worst: Int
+        if let providedStep = stepIndex {
+            worst = max(0, min(providedStep, cfg.winSize - 1))
+        } else {
+            let perStep = (sq.mean(axis: -1)[0]) * M[0]   // [L]
+            worst = argMax(perStep, axis: 0).item(Int.self)
+        }
         return sq[0, worst].asArray(Float.self).map(Double.init)
+    }
+
+    private static func details(from flat: [Float], rows: Int, cols: Int) -> [ATScoreDetail] {
+        guard rows > 0, cols > 0 else { return [] }
+        var out: [ATScoreDetail] = []
+        out.reserveCapacity(rows)
+        for row in 0..<rows {
+            let offset = row * cols
+            var best = -Double.infinity
+            var bestIndex = 0
+            for col in 0..<cols {
+                let value = Double(flat[offset + col])
+                if value > best {
+                    best = value
+                    bestIndex = col
+                }
+            }
+            out.append(ATScoreDetail(score: best.isFinite ? best : 0, stepIndex: bestIndex))
+        }
+        return out
     }
 }

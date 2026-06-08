@@ -6,12 +6,18 @@ struct HealthWindow: Codable, Sendable, Identifiable {
     let values: [[Double]]
     let mask: [Double]
     let featureMask: [[Double]]
+
+    func bucketStart(at index: Int, bucketHours: Int) -> Date {
+        let safeIndex = max(0, min(index, max(0, values.count - 1)))
+        return Calendar.current.date(byAdding: .hour, value: safeIndex * bucketHours, to: start) ?? start
+    }
 }
 
 struct NormalizationStats: Codable, Sendable { let mean: [Double]; let std: [Double] }
 struct DatasetSummary: Codable, Sendable {
     let firstDate: Date; let lastDate: Date; let bucketCount: Int
     let trainWindows: Int; let validationWindows: Int; let testWindows: Int; let validRatio: Double
+    let bucketHours: Int
 }
 struct PreparedHealthDataset: Codable, Sendable {
     let train: [HealthWindow]; let validation: [HealthWindow]; let test: [HealthWindow]
@@ -37,7 +43,7 @@ final class HealthPreprocessor {
         guard windows.count >= 3 else { throw AppError.notEnoughHistory }
         let trainEnd = Int(Double(windows.count) * 0.70)
         let valEnd = Int(Double(windows.count) * 0.85)
-        let summary = DatasetSummary(firstDate: buckets.first!.start, lastDate: buckets.last!.start, bucketCount: buckets.count, trainWindows: trainEnd, validationWindows: max(0, valEnd - trainEnd), testWindows: max(0, windows.count - valEnd), validRatio: rowMask.reduce(0.0,+) / Double(rowMask.count))
+        let summary = DatasetSummary(firstDate: buckets.first!.start, lastDate: buckets.last!.start, bucketCount: buckets.count, trainWindows: trainEnd, validationWindows: max(0, valEnd - trainEnd), testWindows: max(0, windows.count - valEnd), validRatio: rowMask.reduce(0.0,+) / Double(rowMask.count), bucketHours: bucketHours)
         return PreparedHealthDataset(train: Array(windows[..<trainEnd]), validation: Array(windows[trainEnd..<valEnd]), test: Array(windows[valEnd..<windows.count]), stats: stats, summary: summary)
     }
 
@@ -162,6 +168,10 @@ enum SyntheticHealthHistory {
             let values: [(HealthFeature, Double)] = [(.heartRate, 68 + 18*activity - 8*sleep + Double.random(in: -4...4)), (.steps, max(0, 2200*activity + Double.random(in: -120...120))), (.activeEnergy, max(0, 110*activity + Double.random(in: -8...8))), (.hrv, 45 - 8*activity + 10*sleep + Double.random(in: -4...4)), (.oxygen, 0.97 + Double.random(in: -0.01...0.01)), (.respiratoryRate, 14 + 2*activity + Double.random(in: -0.8...0.8)), (.sleep, sleep), (.exercise, max(0, 25*activity + Double.random(in: -3...3)))]
             let end = calendar.date(byAdding: .hour, value: 4, to: date) ?? date
             for item in values { events.append(RawHealthEvent(feature: item.0, start: date, end: end, value: item.1)) }
+        }
+        if let spikeStart = calendar.date(byAdding: .day, value: -10, to: Date()),
+           let spikeEnd = calendar.date(byAdding: .minute, value: 5, to: spikeStart) {
+            events.append(RawHealthEvent(feature: .heartRate, start: spikeStart, end: spikeEnd, value: 205))
         }
         return events
     }

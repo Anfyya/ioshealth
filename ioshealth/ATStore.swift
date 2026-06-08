@@ -11,6 +11,10 @@ struct PersistedState: Codable, Sendable {
     let createdAt: Date
     let summary: DatasetSummary
     let reports: [HealthReport]
+    let selectedRange: HealthDataRange?
+    let trainingEpochs: Int?
+    let evaluatedWindows: Int?
+    let rawGuardCount: Int?
 }
 
 enum ATStore {

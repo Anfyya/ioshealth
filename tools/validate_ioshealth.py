@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -14,10 +15,13 @@ EXPECTED_FILES = [
     APP_DIR / "HealthAnomalyApp.swift",
     APP_DIR / "HealthKitPipeline.swift",
     APP_DIR / "Preprocessing.swift",
-    APP_DIR / "ModelsAndScoring.swift",
-    APP_DIR / "Storage.swift",
+    APP_DIR / "ATModel.swift",
+    APP_DIR / "ATEngine.swift",
+    APP_DIR / "ATFusion.swift",
+    APP_DIR / "ATStore.swift",
     APP_DIR / "ioshealth.entitlements",
-    APP_DIR / "Resources" / "PopulationPriors.json",
+    APP_DIR / "Resources" / "PredictionBase.json",
+    APP_DIR / "Resources" / "PredictionBase.safetensors",
 ]
 
 
@@ -33,6 +37,9 @@ def validate_files(errors: list[str]) -> None:
     for path in EXPECTED_FILES:
         if not path.exists():
             fail(f"missing file: {path.relative_to(ROOT)}", errors)
+    weights = APP_DIR / "Resources" / "PredictionBase.safetensors"
+    if weights.exists() and weights.stat().st_size <= 0:
+        fail("PredictionBase.safetensors is empty", errors)
 
 
 def validate_project(errors: list[str]) -> None:
@@ -42,7 +49,12 @@ def validate_project(errors: list[str]) -> None:
     text = pbxproj.read_text(encoding="utf-8")
     required = [
         "HealthKit.framework",
-        "PopulationPriors.json",
+        "PredictionBase.safetensors",
+        "PredictionBase.json",
+        "ATModel.swift",
+        "ATEngine.swift",
+        "ATFusion.swift",
+        "ATStore.swift",
         "CODE_SIGN_ENTITLEMENTS = ioshealth/ioshealth.entitlements;",
         "INFOPLIST_KEY_NSHealthShareUsageDescription",
     ]
@@ -55,7 +67,8 @@ def validate_project(errors: list[str]) -> None:
         fail("project contains replacement characters", errors)
 
 
-def validate_swift(errors: list[str]) -> None:
+def validate_swift_structure(errors: list[str]) -> None:
+    shorthand = re.compile(r"\b(if|guard|else if) let [A-Za-z_][A-Za-z0-9_]* \{")
     for path in APP_DIR.glob("*.swift"):
         text = path.read_text(encoding="utf-8")
         rel = path.relative_to(ROOT)
@@ -74,94 +87,152 @@ def validate_swift(errors: list[str]) -> None:
             fail(f"{rel}: uses closed range for test split", errors)
         if "\ufffd" in text:
             fail(f"{rel}: contains replacement characters", errors)
-        if "if let error {" in text or "guard let objectType else" in text or "else if let last {" in text or "else if let next {" in text:
-            fail(f"{rel}: uses optional binding shorthand in Swift 5 project", errors)
+        if shorthand.search(text):
+            fail(f"{rel}: uses optional binding shorthand", errors)
 
-    healthkit = APP_DIR / "HealthKitPipeline.swift"
-    if healthkit.exists():
-        text = healthkit.read_text(encoding="utf-8")
-        if "toShare: Set<HKSampleType>()" not in text:
-            fail("HealthKitPipeline.swift: HealthKit share type is not explicit", errors)
-        if "guard let objectType = objectType else { return nil }" not in text:
-            fail("HealthKitPipeline.swift: sampleType does not safely unwrap objectType", errors)
-        if "case .heartRate, .hrv, .oxygen, .respiratoryRate, .sleep: return .mean" not in text:
-            fail("HealthKitPipeline.swift: sleep should be duration-weighted mean per bucket", errors)
 
-    app = APP_DIR / "HealthAnomalyApp.swift"
-    if app.exists():
-        text = app.read_text(encoding="utf-8")
-        if text.count("Task.detached(priority: .userInitiated)") < 2:
-            fail("HealthAnomalyApp.swift: preprocessing/training are not both offloaded from MainActor", errors)
-        if "private struct TrainingOutput: Sendable" not in text:
-            fail("HealthAnomalyApp.swift: missing Sendable training output", errors)
+def require_markers(path: Path, markers: list[str], errors: list[str]) -> None:
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    rel = path.relative_to(ROOT)
+    for marker in markers:
+        if marker not in text:
+            fail(f"{rel}: missing marker: {marker}", errors)
 
-    preprocessing = APP_DIR / "Preprocessing.swift"
-    if preprocessing.exists():
-        text = preprocessing.read_text(encoding="utf-8")
-        required = [
+
+def validate_pipeline(errors: list[str]) -> None:
+    require_markers(
+        APP_DIR / "HealthKitPipeline.swift",
+        [
+            "enum HealthDataRange",
+            "case all, fiveYears, threeYears, sevenMonths",
+            "func loadHistory(range: HealthDataRange = .all)",
+            "HKQuery.predicateForSamples(withStart: start, end: end, options: options)",
+            "toShare: Set<HKSampleType>()",
+            "guard let objectType = objectType else { return nil }",
+        ],
+        errors,
+    )
+    require_markers(
+        APP_DIR / "Preprocessing.swift",
+        [
+            "let bucketHours = 4",
+            "let bucketHours: Int",
+            "func bucketStart(at index: Int, bucketHours: Int)",
             "let lastEventDate = sorted.map",
             "let effectiveEnd = event.end > event.start ?",
             "let overlapStart = event.start > bucketStart ?",
-            "let overlapEnd = event.end < bucketEnd ?",
             "event.value * (weight / duration)",
-        ]
-        for marker in required:
-            if marker not in text:
-                fail(f"Preprocessing.swift: missing bucket overlap marker: {marker}", errors)
+        ],
+        errors,
+    )
+    require_markers(
+        APP_DIR / "HealthAnomalyApp.swift",
+        [
+            "selectedRange: HealthDataRange = .all",
+            "let plannedEpochs = TrainingPlanner.epochs",
+            "let evaluation = dataset.train + dataset.validation + dataset.test",
+            "RawAlertDetector.reports(from: events)",
+            "TabView",
+            "RangeSelector",
+            "SignalSummaryCard",
+            "PredictionBase.safetensors",
+        ],
+        errors,
+    )
+    app_text = (APP_DIR / "HealthAnomalyApp.swift").read_text(encoding="utf-8")
+    if ".suffix(30)" in app_text:
+        fail("HealthAnomalyApp.swift: still limits analysis display to suffix(30)", errors)
+    if app_text.count("Task.detached(priority: .userInitiated)") < 2:
+        fail("HealthAnomalyApp.swift: preprocessing/training are not both offloaded from MainActor", errors)
 
-    scoring = APP_DIR / "ModelsAndScoring.swift"
-    if scoring.exists():
-        text = scoring.read_text(encoding="utf-8")
-        if "let midpoint = Double(lower) + Double(upper - lower) * 0.5" not in text:
-            fail("ModelsAndScoring.swift: percentile rank is not tie-aware", errors)
+
+def validate_model(errors: list[str]) -> None:
+    require_markers(
+        APP_DIR / "ATModel.swift",
+        [
+            "final class ReconNet",
+            "final class PredNet",
+            "final class CrossAttention",
+            "AnomalyAttentionLayer",
+        ],
+        errors,
+    )
+    require_markers(
+        APP_DIR / "ATEngine.swift",
+        [
+            "struct ATScoreDetail",
+            "PredictionBase.safetensors",
+            "func trainRecon",
+            "func reconScoreDetails",
+            "func predScoreDetails",
+            "func reconFeatureError(_ window: HealthWindow, stepIndex: Int? = nil)",
+            "private static func details(from flat: [Float], rows: Int, cols: Int)",
+        ],
+        errors,
+    )
+    require_markers(
+        APP_DIR / "ATFusion.swift",
+        [
+            "enum ReportSource",
+            "case rawGuard, personalModel, predictionBase, fused",
+            "static let watchThreshold = 85.0",
+            "enum RawAlertDetector",
+            "sleepDurationReports",
+            "func mergeAdjacent",
+        ],
+        errors,
+    )
+    require_markers(
+        APP_DIR / "ATStore.swift",
+        [
+            "let selectedRange: HealthDataRange?",
+            "let trainingEpochs: Int?",
+            "let evaluatedWindows: Int?",
+            "let rawGuardCount: Int?",
+        ],
+        errors,
+    )
 
 
-def validate_priors(errors: list[str]) -> None:
-    path = APP_DIR / "Resources" / "PopulationPriors.json"
+def validate_prediction_base(errors: list[str]) -> None:
+    path = APP_DIR / "Resources" / "PredictionBase.json"
     if not path.exists():
         return
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        fail(f"PopulationPriors.json invalid JSON: {exc}", errors)
+        fail(f"PredictionBase.json invalid JSON: {exc}", errors)
         return
-    priors = payload.get("priors")
-    if not isinstance(priors, list) or not priors:
-        fail("PopulationPriors.json has no priors", errors)
-        return
-    seen_8f = False
-    for prior in priors:
-        name = prior.get("name", "<unnamed>")
-        feature_count = prior.get("featureCount")
-        features = prior.get("features")
-        for field in ("windowSize", "horizon", "lag"):
-            if not isinstance(prior.get(field), int) or prior[field] <= 0:
-                fail(f"{name}: invalid {field}", errors)
-        if not isinstance(feature_count, int) or feature_count <= 0:
-            fail(f"{name}: invalid featureCount", errors)
-            continue
-        if feature_count == 8:
-            seen_8f = True
-        if not isinstance(features, list) or len(features) != feature_count:
-            fail(f"{name}: feature length does not match featureCount", errors)
-            continue
-        for idx, feature in enumerate(features):
-            cross = feature.get("cross")
-            if not isinstance(cross, list) or len(cross) != feature_count:
-                fail(f"{name}: feature {idx} cross length mismatch", errors)
-            for field in ("intercept", "autoreg", "seasonal"):
-                if not isinstance(feature.get(field), (int, float)):
-                    fail(f"{name}: feature {idx} invalid {field}", errors)
-    if not seen_8f:
-        fail("PopulationPriors.json lacks 8-feature prior for HealthKit pipeline", errors)
+    expected = {
+        "model_type": "anomaly_transformer_crossattn_pred",
+        "win_size": 252,
+        "context_len": 228,
+        "predict_horizon": 24,
+        "enc_in": 8,
+        "c_out": 8,
+        "d_model": 64,
+        "n_heads": 4,
+        "e_layers": 2,
+        "d_ff": 128,
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            fail(f"PredictionBase.json: {key} expected {value!r}, got {payload.get(key)!r}", errors)
+    features = payload.get("feature_order")
+    if not isinstance(features, list) or len(features) != 8:
+        fail("PredictionBase.json: feature_order must contain 8 features", errors)
 
 
 def main() -> int:
     errors: list[str] = []
     validate_files(errors)
     validate_project(errors)
-    validate_swift(errors)
-    validate_priors(errors)
+    validate_swift_structure(errors)
+    validate_pipeline(errors)
+    validate_model(errors)
+    validate_prediction_base(errors)
     if errors:
         print("ioshealth static validation failed:")
         for item in errors:

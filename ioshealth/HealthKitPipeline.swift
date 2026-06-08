@@ -14,6 +14,43 @@ enum HealthFeature: Int, Codable, CaseIterable, Identifiable, Sendable {
 
 enum AggregationMethod: String, Codable, Sendable { case mean, sum, max }
 
+enum HealthDataRange: String, CaseIterable, Identifiable, Codable, Sendable {
+    case all, fiveYears, threeYears, sevenMonths
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "全部"
+        case .fiveYears: return "5 年"
+        case .threeYears: return "3 年"
+        case .sevenMonths: return "7 个月"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .all: return "读取 HealthKit 可返回的全部历史样本"
+        case .fiveYears: return "只分析最近 5 年"
+        case .threeYears: return "只分析最近 3 年"
+        case .sevenMonths: return "只分析最近 7 个月"
+        }
+    }
+
+    func startDate(relativeTo end: Date, calendar: Calendar = .current) -> Date? {
+        switch self {
+        case .all:
+            return nil
+        case .fiveYears:
+            return calendar.date(byAdding: .year, value: -5, to: end)
+        case .threeYears:
+            return calendar.date(byAdding: .year, value: -3, to: end)
+        case .sevenMonths:
+            return calendar.date(byAdding: .month, value: -7, to: end)
+        }
+    }
+}
+
 struct RawHealthEvent: Codable, Sendable {
     let feature: HealthFeature
     let start: Date
@@ -50,9 +87,10 @@ final class HealthKitDataSource {
         }
     }
 
-    func loadHistory(daysBack: Int) async throws -> [RawHealthEvent] {
+    func loadHistory(range: HealthDataRange = .all) async throws -> [RawHealthEvent] {
         let end = Date()
-        guard let start = Calendar.current.date(byAdding: .day, value: -daysBack, to: end) else { throw AppError.invalidDateRange }
+        let start = range.startDate(relativeTo: end)
+        if range != .all && start == nil { throw AppError.invalidDateRange }
         var events: [RawHealthEvent] = []
         for feature in HealthFeature.allCases {
             events.append(contentsOf: try await query(feature: feature, start: start, end: end))
@@ -60,9 +98,10 @@ final class HealthKitDataSource {
         return events.sorted { $0.start < $1.start }
     }
 
-    private func query(feature: HealthFeature, start: Date, end: Date) async throws -> [RawHealthEvent] {
+    private func query(feature: HealthFeature, start: Date?, end: Date) async throws -> [RawHealthEvent] {
         guard let sampleType = feature.sampleType else { return [] }
-        let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: [.strictStartDate])
+        let options: HKQueryOptions = start == nil ? [] : [.strictStartDate]
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: options)
         let sort = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[RawHealthEvent], Error>) in
             let query = HKSampleQuery(sampleType: sampleType, predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: [sort]) { _, samples, error in
